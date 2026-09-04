@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Konwersja SRVGGNetCompact (Real-ESRGAN pth) → CoreML mlpackage.
+"""Convert SRVGGNetCompact (Real-ESRGAN .pth) to a CoreML mlpackage.
 
-Użycie:
+Usage:
   convert.py PTH OUT.mlpackage WxH [--upscale 4]
 
-Wymaga: torch, coremltools (setup.sh --torch).
-Architektura: SRVGGNetCompact (realesr-animevideov3, realesrnet-x4plus), standalone.
+Requires: torch, coremltools (setup.sh --torch).
+Architecture: SRVGGNetCompact (realesr-animevideov3, realesrnet-x4plus), standalone.
 """
 import sys
 
@@ -72,7 +72,7 @@ def main():
         compute_precision=ct.precision.FLOAT16,
     )
     mlmodel.save(out)
-    print(f'zapisano {out} (wejście {w}x{h})')
+    print(f'saved {out} (input {w}x{h})')
 
 
 if __name__ == '__main__':

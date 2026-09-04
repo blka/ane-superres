@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""CoreML super-rozdzielczość: rawvideo rgb24 (stdin) → model ANE → rawvideo rgb24 (stdout).
+"""CoreML super-resolution: rawvideo rgb24 (stdin) -> ANE model -> rawvideo rgb24 (stdout).
 
-Użycie (w pipe z ffmpeg):
+Usage (piped with ffmpeg):
   ffmpeg ... -f rawvideo -pix_fmt rgb24 - | sr_driver.py MODEL WxH | ffmpeg ...
 
-MODEL — katalog .mlpackage z wejściem TensorType (1,3,H,W).
-WxH   — rozmiar klatki wejściowej, np. 720x576.
+MODEL — an .mlpackage directory with TensorType input (1,3,H,W).
+WxH   — input frame size, e.g. 720x576.
 
-Środowisko: SR_LOG_EVERY (co ile klatek log postępu na stderr, domyślnie 500).
+Environment: SR_LOG_EVERY (log progress to stderr every N frames, default 500).
 """
 import os
 import sys
