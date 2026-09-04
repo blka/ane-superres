@@ -57,16 +57,14 @@ fi
 # po modelu: W*4 x H*4; docelowe THxTW.
 # out-scale = 2 → bicubic 0.5 z x4; inaczej scale bezpośrednio.
 X4W=$((W * 4)); X4H=$((H * 4))
-OUTVF="scale=${TW}:${TH}:flags=bicubic,crop=${TW}:${TH}:0:0,setsar=1"
-if (( TW == X4W / 2 && TH == X4H / 2 )); then
-  OUTVF="scale=${TW}:${TH}:flags=bicubic,setsar=1"
-elif (( TW == X4W && TH == X4H )); then
+W2=$((W * 2)); H2=$((H * 2))
+# semantyka ncnn "x2": model x4 -> bicubic ½ do W2xH2 -> centrowany crop do celu
+if (( TW == X4W && TH == X4H )); then
   OUTVF="setsar=1"
+elif (( TW <= W2 && TH <= H2 )); then
+  OUTVF="scale=${W2}:${H2}:flags=bicubic,crop=${TW}:${TH}:$(( (W2 - TW) / 2 )):$(( (H2 - TH) / 2 )),setsar=1"
 else
-  # arbitralny cel: bicubic 0.5 jeśli blisko połowy, inaczej prosty scale z x4
-  if (( TH <= X4H / 2 )); then
-    OUTVF="scale=${TW}:${TH}:flags=bicubic,setsar=1"
-  fi
+  OUTVF="scale=${TW}:${TH}:flags=bicubic,setsar=1"
 fi
 
 [[ -n "$OUT" ]] || OUT="${VIDEO:r}_sr.mp4"
