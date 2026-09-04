@@ -110,6 +110,21 @@ outputs are float 0–1 NCHW tensors; the driver handles the 0–255 conversion.
 
 `setup.sh --torch` also downloads the `realesr-animevideov3` `.pth` weights.
 
+### Batching
+
+ANE inference on a batch-1 model leaves the engine partly idle. `rebatch.py`
+produces a copy of a model with batch N (the SRVGG graph is batch-agnostic):
+
+```zsh
+python3 rebatch.py models/av3x4_tensor.mlpackage 4 models/av3x4_tensor_b4.mlpackage
+./sr-upscale VIDEO --model models/av3x4_tensor_b4.mlpackage
+```
+
+The driver reads the batch size from the model (pads the final partial batch by
+repeating its last frame — output stays byte-identical). Batch-4 measured
+~10% faster per frame than batch-1; the driver also overlaps postprocessing
+with inference, which hides most of the remaining per-frame CPU cost.
+
 ## Why not ncnn?
 
 ncnn+Vulkan *works* on macOS — after two fixes — but it is 32× slower on this
