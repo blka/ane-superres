@@ -47,8 +47,11 @@ def main():
         t0 = time.perf_counter()
         x = np.ascontiguousarray(frame.transpose(2, 0, 1)[None].astype(np.float32) / 255.0)
         y = np.asarray(m.predict({in_key: x})[out_key], dtype=np.float32)  # (1,3,H*s,W*s)
-        out = np.clip(y[0], 0, 1) * 255
-        out = np.ascontiguousarray(out.transpose(1, 2, 0)).astype(np.uint8)
+        # clip after scaling (not before): one fewer full-size float pass.
+        # bit-identical to clip(y,0,1)*255 — floor() and the uint8 cast round
+        # the same way for every input value.
+        out = np.clip(y[0] * 255, 0, 255).astype(np.uint8)
+        out = np.ascontiguousarray(out.transpose(1, 2, 0))
         if n == 0:
             print(f'model: in {w}x{h} -> out {out.shape[1]}x{out.shape[0]}', file=sys.stderr)
         stdout.write(out.tobytes())
