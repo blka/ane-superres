@@ -1,0 +1,94 @@
+#!/usr/bin/env zsh
+# sr-upscale — super-rozdzielczość wideo przez CoreML/ANE (Apple Silicon).
+#
+# Użycie:
+#   sr-upscale VIDEO [-o OUT] [-s HH:MM:SS] [-d DUR] [--target HxW]
+#                  [--no-deint] [--bitrate 10M] [--model MODELS/av3x4_tensor.mlpackage]
+#
+# Pipeline: ffmpeg (opcjonalnie bwdif+hqdn3d) → sr_driver.py (ANE, ×4)
+#           → bicubic 0.5 + crop/scale do celu → h264_videotoolbox, audio -c:a copy.
+#
+# Domyślny cel: 2× wejścia (H*2 x W*2). --target wymusza docelowy rozmiar
+# (kropka środkowa: najpierw bicubic 0.5, potem centrowany crop/scale).
+set -euo pipefail
+
+VIDEO="" OUT="" START="" DUR="" TARGET="" DEINT=1 BITRATE="10M"
+SCRIPT_DIR="${0:A:h}"
+MODEL="${SCRIPT_DIR}/models/av3x4_tensor.mlpackage"
+PY="${SCRIPT_DIR}/.venv/bin/python"
+
+usage() { sed -n '2,12p' "$0"; exit 1; }
+[[ $# -lt 1 ]] && usage
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) OUT="$2"; shift 2 ;;
+    -s) START="$2"; shift 2 ;;
+    -d) DUR="$2"; shift 2 ;;
+    --target) TARGET="$2"; shift 2 ;;
+    --no-deint) DEINT=0; shift ;;
+    --bitrate) BITRATE="$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
+    -h|--help) usage ;;
+    *) if [[ -z "$VIDEO" ]]; then VIDEO="$1"; shift; else echo "zbyt wiele argumentów: $1" >&2; exit 2; fi ;;
+  esac
+done
+
+[[ -f "$VIDEO" ]] || { echo "nie ma pliku: $VIDEO" >&2; exit 2; }
+[[ -d "$MODEL" ]] || { echo "brak modelu: $MODEL (uruchom ./setup.sh)" >&2; exit 2; }
+
+read W H FPS <<<"$(ffprobe -v error -select_streams v:0 \
+  -show_entries stream=width,height,r_frame_rate \
+  -of csv=p=0:s=x "$VIDEO" | head -1 | tr 'x' ' ')"
+
+# filtr wejściowy: deinterlace + denoise (źródła SD) albo surowo
+VF=""
+if [[ $DEINT -eq 1 ]]; then
+  VF="bwdif=mode=send_field,hqdn3d,"
+fi
+
+# cel wyjściowy
+if [[ -n "$TARGET" ]]; then
+  TH="${TARGET%x*}"; TW="${TARGET#*x}"
+else
+  TH=$((H * 2)); TW=$((W * 2))
+fi
+
+# po modelu: W*4 x H*4; docelowe THxTW.
+# out-scale = 2 → bicubic 0.5 z x4; inaczej scale bezpośrednio.
+X4W=$((W * 4)); X4H=$((H * 4))
+OUTVF="scale=${TW}:${TH}:flags=bicubic,crop=${TW}:${TH}:0:0,setsar=1"
+if (( TW == X4W / 2 && TH == X4H / 2 )); then
+  OUTVF="scale=${TW}:${TH}:flags=bicubic,setsar=1"
+elif (( TW == X4W && TH == X4H )); then
+  OUTVF="setsar=1"
+else
+  # arbitralny cel: bicubic 0.5 jeśli blisko połowy, inaczej prosty scale z x4
+  if (( TH <= X4H / 2 )); then
+    OUTVF="scale=${TW}:${TH}:flags=bicubic,setsar=1"
+  fi
+fi
+
+[[ -n "$OUT" ]] || OUT="${VIDEO:r}_sr.mp4"
+
+SSA=(); DURA=()
+[[ -n "$START" ]] && SSA=(-ss "$START")
+[[ -n "$DUR" ]] && DURA=(-t "$DUR")
+
+echo "sr-upscale: $VIDEO (${W}x${H} @ ${FPS}) -> $OUT (${TW}x${TH}), model $MODEL" >&2
+
+# bwdif=send_field podwaja tempo klatek (pole->klatka)
+if [[ $DEINT -eq 1 ]]; then
+  FN="${FPS%%/*}"; FD="${FPS#*/}"
+  FPS="$((FN * 2))/${FD}"
+fi
+
+ffmpeg -v error "${SSA[@]}" "${DURA[@]}" -i "$VIDEO" -vf "${VF}format=rgb24" \
+  -f rawvideo -pix_fmt rgb24 - \
+| "$PY" "${SCRIPT_DIR}/sr_driver.py" "$MODEL" "${W}x${H}" 2> >(grep -E 'DONE|model:|frame [0-9]*0000:' >&2) \
+| ffmpeg -v error -y -f rawvideo -pix_fmt rgb24 -s ${X4W}x${X4H} -r "$FPS" -i - \
+    "${SSA[@]}" "${DURA[@]}" -i "$VIDEO" \
+    -vf "$OUTVF" -c:v h264_videotoolbox -b:v "$BITRATE" -pix_fmt yuv420p \
+    -map 0:v -map '1:a?' -c:a copy -shortest "$OUT"
+
+echo "gotowe: $OUT" >&2
