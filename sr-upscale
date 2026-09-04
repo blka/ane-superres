@@ -4,22 +4,31 @@
 # Usage:
 #   sr-upscale VIDEO [-o OUT] [-s HH:MM:SS] [-d DUR] [--target HxW]
 #                  [--no-deint] [--bitrate 10M] [--model MODELS/av3x4_tensor.mlpackage]
+#                  [--chunk SECONDS] [--retries N] [--fresh]
 #
 # Pipeline: ffmpeg (optional bwdif+hqdn3d) -> sr_driver.py (ANE, x4)
 #           -> bicubic 0.5 + crop/scale to target -> h264_videotoolbox, audio -c:a copy.
 #
 # Default target: 2x input size (H*2 x W*2). --target forces the output size
 # (center-aligned: bicubic 0.5 first, then a centered crop/scale).
+#
+# Long renders: --chunk SECONDS splits the output into self-contained mp4 parts
+# of SECONDS each (forced keyframe at every boundary), stored in OUT.parts/.
+# A killed or crashed render is resumed by re-running the same command: it
+# picks up after the last complete chunk and concatenates everything into OUT
+# at the end. --retries N makes the wrapper retry on its own (with resume).
+# -s/-d are not supported together with --chunk.
 set -euo pipefail
+export LC_ALL=C
 
-VIDEO="" OUT="" START="" DUR="" TARGET="" DEINT=1 BITRATE="10M"
+VIDEO="" OUT="" START="" DUR="" TARGET="" DEINT=1 BITRATE="10M" CHUNK="" RETRIES=0 FRESH=0
 SCRIPT_DIR="${0:A:h}"
 SELF="${0:A}"
 MODEL="${SCRIPT_DIR}/models/av3x4_tensor.mlpackage"
 PY="${SCRIPT_DIR}/.venv/bin/python"
 
 # note: inside a zsh function $0 is the function name, not the script path
-usage() { sed -n '2,12p' "$SELF"; exit 1; }
+usage() { sed -n '2,19p' "$SELF"; exit 1; }
 [[ $# -lt 1 ]] && usage
 
 while [[ $# -gt 0 ]]; do
@@ -31,6 +40,9 @@ while [[ $# -gt 0 ]]; do
     --no-deint) DEINT=0; shift ;;
     --bitrate) BITRATE="$2"; shift 2 ;;
     --model) MODEL="$2"; shift 2 ;;
+    --chunk) CHUNK="$2"; shift 2 ;;
+    --retries) RETRIES="$2"; shift 2 ;;
+    --fresh) FRESH=1; shift ;;
     -h|--help) usage ;;
     *) if [[ -z "$VIDEO" ]]; then VIDEO="$1"; shift; else echo "too many arguments: $1" >&2; exit 2; fi ;;
   esac
@@ -71,11 +83,42 @@ fi
 
 [[ -n "$OUT" ]] || OUT="${VIDEO:r}_sr.mp4"
 
+# chunked, resumable mode
+PARTS_DIR=""
+if [[ -n "$CHUNK" ]]; then
+  [[ -n "$START" || -n "$DUR" ]] && { echo "--chunk cannot be combined with -s/-d" >&2; exit 2; }
+  [[ "$CHUNK" =~ ^[0-9]+$ ]] || { echo "--chunk needs an integer number of seconds" >&2; exit 2; }
+  PARTS_DIR="${OUT:r}.parts"
+  if (( FRESH )) && [[ -d "$PARTS_DIR" ]]; then
+    rm -rf "$PARTS_DIR"
+    echo "wiped parts: $PARTS_DIR" >&2
+  fi
+  mkdir -p "$PARTS_DIR"
+fi
+
+# number of complete leading chunks on disk (0 if none / fresh).
+# a trailing partial chunk from an interrupted run is ignored and re-rendered.
+count_done() {
+  local i=0 p d ok
+  while :; do
+    p=$(printf '%s/p%06d.mp4' "$PARTS_DIR" "$i")
+    [[ -f "$p" ]] || break
+    d=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$p" 2>/dev/null) || break
+    ok=$(awk -v d="$d" -v c="$CHUNK" 'BEGIN{print (d >= c - 1) ? 1 : 0}')
+    (( ok )) || break
+    i=$((i + 1))
+  done
+  echo "$i"
+}
+
 SSA=(); DURA=()
 [[ -n "$START" ]] && SSA=(-ss "$START")
 [[ -n "$DUR" ]] && DURA=(-t "$DUR")
 
 echo "sr-upscale: $VIDEO (${W}x${H} @ ${FPS}) -> $OUT (${TW}x${TH}), model $MODEL" >&2
+
+# source fps before deinterlacing; keep both for the resume offset math
+SRCFPS="$FPS"
 
 # bwdif=send_field doubles the frame rate (field -> frame)
 if [[ $DEINT -eq 1 ]]; then
@@ -83,12 +126,97 @@ if [[ $DEINT -eq 1 ]]; then
   FPS="$((FN * 2))/${FD}"
 fi
 
-ffmpeg -v error "${SSA[@]}" "${DURA[@]}" -i "$VIDEO" -vf "${VF}format=rgb24" \
-  -f rawvideo -pix_fmt rgb24 - \
-| "$PY" "${SCRIPT_DIR}/sr_driver.py" "$MODEL" "${W}x${H}" 2> >(grep -E 'DONE|model:|frame [0-9]*0000:' >&2) \
-| ffmpeg -v error -y -f rawvideo -pix_fmt rgb24 -s ${X4W}x${X4H} -r "$FPS" -i - \
-    "${SSA[@]}" "${DURA[@]}" -i "$VIDEO" \
-    -vf "$OUTVF" -c:v h264_videotoolbox -b:v "$BITRATE" -pix_fmt yuv420p \
-    -map 0:v -map '1:a?' -c:a copy -shortest "$OUT"
+# chunk -> source-seconds conversion (output fps may be 2x source fps)
+SRC_PER_CHUNK=""
+if [[ -n "$PARTS_DIR" ]]; then
+  SRC_PER_CHUNK=$(awk -v c="$CHUNK" \
+    -v a="${SRCFPS%%/*}" -v b="${SRCFPS#*/}" \
+    -v x="${FPS%%/*}"  -v y="${FPS#*/}" \
+    'BEGIN{printf "%.6f", c * a * y / (b * x)}')
+fi
 
-echo "done: $OUT" >&2
+DONE=0
+if [[ -n "$PARTS_DIR" ]]; then
+  DONE=$(count_done)
+  if (( DONE > 0 )); then
+    SKIP=$(awk -v n="$DONE" -v s="$SRC_PER_CHUNK" 'BEGIN{printf "%.6f", n * s}')
+    SSA=(-ss "$SKIP")
+    echo "resume: $DONE complete chunk(s), continuing at source $(awk -v t="$SKIP" 'BEGIN{printf "%.1f", t/60}') min" >&2
+  fi
+fi
+
+# one render attempt; returns non-zero if killed/crashed. In chunk mode the
+# output goes to parts (forced keyframes at chunk boundaries), otherwise
+# straight to OUT.
+render_once() {
+  local rc=0
+  if [[ -n "$PARTS_DIR" ]]; then
+    ffmpeg -v error "${SSA[@]}" "${DURA[@]}" -i "$VIDEO" -vf "${VF}format=rgb24" \
+      -f rawvideo -pix_fmt rgb24 - \
+    | "$PY" "${SCRIPT_DIR}/sr_driver.py" "$MODEL" "${W}x${H}" 2> >(grep -E 'DONE|model:|frame [0-9]*0000:' >&2) \
+    | ffmpeg -v error -y -f rawvideo -pix_fmt rgb24 -s ${X4W}x${X4H} -r "$FPS" -i - \
+        "${SSA[@]}" "${DURA[@]}" -i "$VIDEO" \
+        -vf "$OUTVF" -c:v h264_videotoolbox -b:v "$BITRATE" -pix_fmt yuv420p \
+        -force_key_frames "expr:gte(t,n_forced*${CHUNK})" \
+        -map 0:v -map '1:a?' -c:a copy -shortest \
+        -f segment -segment_time "$CHUNK" -segment_start_number "$DONE" -reset_timestamps 1 \
+        "$PARTS_DIR/p%06d.mp4" || rc=$?
+  else
+    ffmpeg -v error "${SSA[@]}" "${DURA[@]}" -i "$VIDEO" -vf "${VF}format=rgb24" \
+      -f rawvideo -pix_fmt rgb24 - \
+    | "$PY" "${SCRIPT_DIR}/sr_driver.py" "$MODEL" "${W}x${H}" 2> >(grep -E 'DONE|model:|frame [0-9]*0000:' >&2) \
+    | ffmpeg -v error -y -f rawvideo -pix_fmt rgb24 -s ${X4W}x${X4H} -r "$FPS" -i - \
+        "${SSA[@]}" "${DURA[@]}" -i "$VIDEO" \
+        -vf "$OUTVF" -c:v h264_videotoolbox -b:v "$BITRATE" -pix_fmt yuv420p \
+        -map 0:v -map '1:a?' -c:a copy -shortest "$OUT" || rc=$?
+  fi
+  return "$rc"
+}
+
+attempt=0
+while :; do
+  if render_once; then
+    break
+  fi
+  rc=$?
+  if (( attempt++ >= RETRIES )); then
+    echo "render failed (rc=$rc), giving up after $((attempt)) attempt(s)" >&2
+    exit "$rc"
+  fi
+  echo "render interrupted (rc=$rc) — retry $attempt/$RETRIES in 15 s" >&2
+  sleep 15
+  if [[ -n "$PARTS_DIR" ]]; then
+    DONE=$(count_done)
+    if (( DONE > 0 )); then
+      SKIP=$(awk -v n="$DONE" -v s="$SRC_PER_CHUNK" 'BEGIN{printf "%.6f", n * s}')
+      SSA=(-ss "$SKIP")
+    else
+      SSA=()
+    fi
+  fi
+done
+
+# chunk mode: concatenate parts into the final file (indexes must be 0..N, no gaps)
+if [[ -n "$PARTS_DIR" ]]; then
+  parts=("$PARTS_DIR"/p([0-9])*.mp4(N))
+  if (( ${#parts[@]} == 0 )); then
+    echo "no parts produced" >&2
+    exit 3
+  fi
+  expected=0
+  for p in "${parts[@]}"; do
+    n="${${p:t}#p}"; n="${n%.mp4}"; n=$((10#$n))
+    (( n == expected++ )) || { echo "gap in chunk sequence at index $n — not concatenating" >&2; exit 3; }
+  done
+  # concat demuxer resolves relative paths against the list file's directory,
+  # so bare filenames are enough (and avoid quoting problems)
+  LIST="${PARTS_DIR}/concat.txt"
+  : > "$LIST"
+  for p in "${parts[@]}"; do
+    print -r -- "file '${p:t}'" >> "$LIST"
+  done
+  ffmpeg -v error -y -f concat -safe 0 -i "$LIST" -c copy "$OUT"
+  echo "done: $OUT (${#parts[@]} chunk(s) concatenated; parts kept in $PARTS_DIR)" >&2
+else
+  echo "done: $OUT" >&2
+fi

@@ -55,6 +55,7 @@ native bindings only up to Python 3.13 — on 3.14 it fails with
 ./sr-upscale VIDEO --no-deint               # progressive source
 ./sr-upscale VIDEO --bitrate 20M            # default 10M
 ./sr-upscale VIDEO --model models/x4plus.mlpackage
+./sr-upscale VIDEO --chunk 600 --retries 20 # long, crash-resumable render
 ```
 
 - `--target` is `HxW` (height first, matches e.g. VLC/HW scaling conventions in
@@ -64,6 +65,25 @@ native bindings only up to Python 3.13 — on 3.14 it fails with
   output. The wrapper handles that automatically.
 - Everything is streamed through pipes: no temp files, disk usage = output only.
 - Audio is `-c:a copy`, never re-encoded.
+
+## Long renders: `--chunk`
+
+A 9-hour render will eventually meet a reboot, an OOM kill or a power cut.
+With `--chunk SECONDS` the output is written as self-contained mp4 parts of
+SECONDS each (keyframe forced at every boundary) into `OUT.parts/`. If the
+render dies, **re-run the same command**: it skips every complete chunk on
+disk, re-renders only the partial trailing one, and concatenates everything
+into the final file at the end. `--retries N` does that loop automatically;
+`--fresh` wipes the parts and starts over.
+
+```zsh
+./sr-upscale VIDEO --chunk 600 --retries 20   # chunks of 10 min, up to 20 restarts
+```
+
+Resume costs one partial chunk (SECONDS of output) — with 10-min chunks a
+worst-case kill loses 10 minutes of work, not the whole film. Verified:
+kill mid-chunk → re-run → final file frame-exact (duration and frame count
+match a single-shot render, seam frames visually continuous).
 
 ## Pipeline
 
