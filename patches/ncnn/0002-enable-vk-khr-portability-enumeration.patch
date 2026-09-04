@@ -1,0 +1,34 @@
+diff --git a/src/gpu.cpp b/src/gpu.cpp
+index c2b6be4..02eebfc 100644
+--- a/src/gpu.cpp
++++ b/src/gpu.cpp
+@@ -963,6 +963,18 @@ int create_gpu_instance()
+         enabledExtensions.push_back("VK_KHR_get_surface_capabilities2");
+     if (support_VK_KHR_surface)
+         enabledExtensions.push_back("VK_KHR_surface");
++
++#if __APPLE__
++    bool use_portability_enumeration = false;
++    for (uint32_t j = 0; j < instanceExtensionPropertyCount; j++)
++    {
++        if (strcmp(instanceExtensionProperties[j].extensionName, "VK_KHR_portability_enumeration") == 0)
++        {
++            enabledExtensions.push_back("VK_KHR_portability_enumeration");
++            use_portability_enumeration = true;
++        }
++    }
++#endif // __APPLE__
+ #if ENABLE_VALIDATION_LAYER
+     if (support_VK_EXT_debug_utils)
+         enabledExtensions.push_back("VK_EXT_debug_utils");
+@@ -1001,6 +1013,10 @@ int create_gpu_instance()
+     instanceCreateInfo.pNext = 0;
+     instanceCreateInfo.flags = 0;
+     instanceCreateInfo.pApplicationInfo = &applicationInfo;
++#if __APPLE__
++    if (use_portability_enumeration)
++        instanceCreateInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
++#endif // __APPLE__
+     instanceCreateInfo.enabledLayerCount = enabledLayers.size();
+     instanceCreateInfo.ppEnabledLayerNames = enabledLayers.data();
+     instanceCreateInfo.enabledExtensionCount = enabledExtensions.size();

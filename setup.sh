@@ -13,6 +13,11 @@ python3.13 -m venv "$DIR/.venv"
 if [[ "${1:-}" == "--torch" ]]; then
   "$DIR/.venv/bin/pip" install -q torch torchvision
   echo "torch zainstalowany (konwersja modeli)"
+  if [[ ! -f "$DIR/realesr-animevideov3.pth" ]]; then
+    curl -sL -o "$DIR/realesr-animevideov3.pth" \
+      "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.3/realesr-animevideov3.pth"
+    echo "wagi pobrane: realesr-animevideov3.pth"
+  fi
 fi
 
 chmod +x "$DIR/sr-upscale" "$DIR/sr_driver.py" 2>/dev/null || true
