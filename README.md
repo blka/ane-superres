@@ -85,6 +85,30 @@ worst-case kill loses 10 minutes of work, not the whole film. Verified:
 kill mid-chunk → re-run → final file frame-exact (duration and frame count
 match a single-shot render, seam frames visually continuous).
 
+### Full film, end to end (the commands we actually used)
+
+```zsh
+# 1. Keep the machine awake for the whole render — a CLI render does NOT hold
+#    a power assertion, so macOS drifts into maintenance sleep every ~15 min
+#    and the pipeline stalls. caffeinate in a separate terminal:
+caffeinate -is -t 43200 &        # 12 h; 57600 for longer renders
+
+# 2. The render itself (full PAL film, crash-resumable, batch-4 model):
+./sr-upscale "Mechanik 1.mp4" \
+  -o "Mechanik 1_sr.mp4" \
+  --model models/av3x4_tensor_b4.mlpackage \
+  --chunk 600 --retries 20
+
+# 3. Quick quality check on a fragment before committing hours of render:
+./sr-upscale "Mechanik 1.mp4" -s 01:35:05 -d 30 -o test_fragment.mp4
+```
+
+Real-world result: 720×576 PAL 25 fps → 1440×1080 @ 50 fps, 326 549 frames,
+~10.5 h wall on a fanless MacBook Air M4 with the batch-4 ANE model
+(116 ms/frame; a second film, 246 729 frames, took ~8.8 h at 128 ms/frame
+the same way). The render survived a kill and resumed from the last
+10-minute chunk.
+
 ## Pipeline
 
 ```

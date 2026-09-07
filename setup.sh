@@ -4,6 +4,21 @@
 set -euo pipefail
 DIR="${0:A:h}"
 
+# system prerequisites that cannot come from pip
+missing=()
+for cmd in ffmpeg ffprobe; do
+  command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+done
+(( ${#missing[@]} )) && {
+  echo "missing: ${missing[*]} — install first: brew install ffmpeg"
+  exit 1
+}
+command -v python3.13 >/dev/null 2>&1 || {
+  echo "missing: python3.13 — install first: brew install python@3.13"
+  echo "(coremltools has native bindings only up to Python 3.13)"
+  exit 1
+}
+
 # coremltools has native bindings only for python <= 3.13 (3.14 is broken)
 python3.13 -m venv "$DIR/.venv"
 "$DIR/.venv/bin/pip" install -q --upgrade pip
