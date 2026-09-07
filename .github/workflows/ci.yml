@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell-syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # zsh scripts — shellcheck does not support zsh, so syntax-check with zsh itself
+      - run: zsh -n sr-upscale setup.sh
+
+  smoke:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c  # v6.0.0
+        with:
+          python-version: '3.13'
+      - name: ffmpeg
+        run: command -v ffmpeg >/dev/null || brew install ffmpeg
+      - name: setup
+        run: ./setup.sh
+      - name: render 2 s test clip (720x576 PAL, model input size)
+        run: |
+          ffmpeg -hide_banner -loglevel error \
+            -f lavfi -i testsrc=size=720x576:rate=25:duration=2 \
+            -pix_fmt yuv420p test.mp4
+          ./sr-upscale test.mp4 -o out.mp4
+      - name: verify output
+        run: |
+          ffprobe -v error -count_frames -select_streams v:0 \
+            -show_entries stream=width,height,nb_read_frames \
+            -of csv=p=0 out.mp4 | tee actual.csv
+          echo '1440,1152,100' > expected.csv   # 2x input, bwdif doubles fps
+          diff expected.csv actual.csv
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [shell-syntax, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - run: gh release create "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
